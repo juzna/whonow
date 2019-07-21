@@ -130,6 +130,11 @@ Optional arguments:
                         Log to CSV file (default: false)
   -m, --verbose         Log request timestamp and sender IP address to stdout 
                         (default: false)
+  -s DOMAIN_SUFFIX, --dns-suffix DOMAIN_SUFFIX
+                        Perform rebinding only for domains ending with 
+                        DOMAIN_SUFFIX, do actual DNS resolution for all other 
+                        domains. This is useful for local testing, e.g.
+                        you can tell docker to use whonow for DNS resolution.
 ```
 
 ## Testing

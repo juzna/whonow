@@ -31,7 +31,7 @@ function main() {
     const orderedDomains = new Set()
 
     server.on('request', (request, response) => {
-
+        let promises = []
         request.question.forEach(question => {
 
             // only handle A queries for now
@@ -39,71 +39,88 @@ function main() {
 
                 const domain = question.name.toLowerCase()
 
-                if (!domains.hasOwnProperty(domain)) {
-                    domains[domain] = new DomainRebind(domain)
-                    orderedDomains.add(domain)
-                    if (orderedDomains.size > args['max_client_records']) {
-                        // remove the oldest client from the set and dict
-                        const oldest = orderedDomains.values().next().value
-                        orderedDomains.delete(oldest)
-                        delete domains[oldest]
+                if (domain.endsWith(args.dns_suffix)) {
+                    if (!domains.hasOwnProperty(domain)) {
+                        domains[domain] = new DomainRebind(domain)
+                        orderedDomains.add(domain)
+                        if (orderedDomains.size > args['max_client_records']) {
+                            // remove the oldest client from the set and dict
+                            const oldest = orderedDomains.values().next().value
+                            orderedDomains.delete(oldest)
+                            delete domains[oldest]
+                        }
                     }
+
+                    const address = domains[domain].next()
+
+                    promises.push({
+                        name: question.name, // respond with original name
+                        address: address || args['default_answer'],
+                        ttl: 1
+                    })                    
+                } else {
+                    log.info('resolving', domain);
+                    promises.push(new Promise((resolve, reject) => {
+                        dns.resolve(domain, (err, address) => {
+                            err ? reject(err) : resolve({
+                                name: question.name,
+                                address: address[0],
+                                ttl: 1
+                            })
+                        })
+                    }))
                 }
-
-                const address = domains[domain].next()
-
-                let answer = {
-                    name: question.name, // respond with original name
-                    address: address || args['default_answer'],
-                    ttl: 1
-                }
-
-                response.answer.push(dns.A(answer))
             }
         })
 
-        if (response.answer.length > 0) {
-            response.answer.forEach(ans => {
+        Promise.all(promises).then((results) => {
+            results.forEach(answer => {
+                response.answer.push(dns.A(answer))
+            });
 
-                const src = `${request.address.address}:${request.address.port}`
+            if (response.answer.length > 0) {
+                response.answer.forEach(ans => {
 
-                if (args.logfile) {
+                    const src = `${request.address.address}:${request.address.port}`
 
-                    // 'timestamp,src_ip,question_type,question,answer'
-                    let line = Date.now() + ','
-                    line += src + ','
-                    line += 'A,'
-                    line += ans.name + ','
-                    line += ans.address + '\n'
+                    if (args.logfile) {
 
-                    // WARNING: because these calls are async, requests may be
-                    // logged out of order. This shouldn't be a problem though
-                    // as the csv can be sorted by timestamp
-                    fs.appendFile(args.logfile, line, (err) => {
-                        if (err) {
-                            log.error(c.red('[!]') + ` error writing to ${args.logfile}`)
-                            log.error(err)
-                        }
-                    })
-                }
+                        // 'timestamp,src_ip,question_type,question,answer'
+                        let line = Date.now() + ','
+                        line += src + ','
+                        line += 'A,'
+                        line += ans.name + ','
+                        line += ans.address + '\n'
 
-                if (args.verbose) {
-                    // time in ISO date format string
-                    // https://docs.microsoft.com/en-us/scripting/javascript/date-and-time-strings-javascript#iso-date-format
-                    const time = c.yellow(new Date().toISOString())
-                    const answer = c.cyan(ans.address.padEnd(15))
-                    const address = c.magenta(src.padEnd(21))
-                    log.info(c.blue('[+]') + ` ${time} ${address} A ${answer} ${ans.name}`)
-                } else {
-                    log.info(c.blue('[+]') + ` A ${c.cyan(ans.address.padEnd(15))} ${ans.name}`)
-                }
-            })
-        } else {
-            // silently responding to non-A requests with an empty response packet
-            // could print here for debugging
-        }
+                        // WARNING: because these calls are async, requests may be
+                        // logged out of order. This shouldn't be a problem though
+                        // as the csv can be sorted by timestamp
+                        fs.appendFile(args.logfile, line, (err) => {
+                            if (err) {
+                                log.error(c.red('[!]') + ` error writing to ${args.logfile}`)
+                                log.error(err)
+                            }
+                        })
+                    }
 
-        response.send()
+                    if (args.verbose) {
+                        // time in ISO date format string
+                        // https://docs.microsoft.com/en-us/scripting/javascript/date-and-time-strings-javascript#iso-date-format
+                        const time = c.yellow(new Date().toISOString())
+                        const answer = c.cyan(ans.address.padEnd(15))
+                        const address = c.magenta(src.padEnd(21))
+                        log.info(c.blue('[+]') + ` ${time} ${address} A ${answer} ${ans.name}`)
+                    } else {
+                        log.info(c.blue('[+]') + ` A ${c.cyan(ans.address.padEnd(15))} ${ans.name}`)
+                    }
+                })
+            } else {
+                // silently responding to non-A requests with an empty response packet
+                // could print here for debugging
+            }
+
+            response.send()
+        })
     })
 
     server.on('listening', () => {
@@ -120,6 +137,8 @@ function main() {
             let m = c.red('[!]')
             m += ` Fatal error binding to port ${args.port}, address in use.`
             log.error(m)
+        } else {
+            log.error(err)
         }
     })
 
@@ -143,6 +162,18 @@ function parseArgs() {
       }
     )
 
+    let message1 = 'Domain name suffix for which rebinding is performed. '
+       message1 += 'All other domains are resolved using system DNS resolved and '
+       message1 += 'their actual IP is returned. Empty string (default) means '
+       message1 += 'that rebinding is always performed.'
+    parser.addArgument(
+      [ '-s', '--dns-suffix' ],
+      {
+        help: message1,
+        defaultValue: ''
+      }
+    )
+
     parser.addArgument(
       [ '-d', '--default-answer' ],
       {
@@ -151,16 +182,16 @@ function parseArgs() {
       }
     )
 
-    let message =  'The number of domain name records to store in RAM at once. '
-        message += 'Once the number of unique domain names queried surpasses this number '
-        message += 'domains will be removed from memory in the order they were '
-        message += 'requested. Domains that have been removed in this way will '
-        message += 'have their program state reset the next time they are queried '
-        message += '(default: 10000000).'
+    let message2 =  'The number of domain name records to store in RAM at once. '
+        message2 += 'Once the number of unique domain names queried surpasses this number '
+        message2 += 'domains will be removed from memory in the order they were '
+        message2 += 'requested. Domains that have been removed in this way will '
+        message2 += 'have their program state reset the next time they are queried '
+        message2 += '(default: 10000000).'
     parser.addArgument(
       [ '-b', '--max-ram-domains' ],
       {
-        help: message,
+        help: message2,
         defaultValue: 10000000
       }
     )
